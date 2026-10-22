@@ -5,35 +5,42 @@ plugins {
     `java-library`
     `maven-publish`
     signing
-    kotlin("jvm") version "2.2.20"
-    id("org.jetbrains.dokka") version "2.0.0"
+    kotlin("jvm") version "2.0.0"
+    id("org.jetbrains.dokka") version "2.1.0"
+    id("org.jetbrains.dokka-javadoc") version "2.1.0"
 }
 
 group = "com.mingliqiye.logger"
-version = "1.0.7"
+version = "2.0.2"
+
+val buildDir: java.nio.file.Path = File("build").toPath()
+
+repositories {
+    mavenCentral()
+}
 
 dependencies {
-    api("org.slf4j:slf4j-api:2.0.17")
-    api("org.apache.logging.log4j:log4j-slf4j2-impl:2.25.1")
-    api("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.19.2")
+    api("org.slf4j:slf4j-api:2.0.20")
+    api("org.apache.logging.log4j:log4j-slf4j2-impl:2.26.1")
+    compileOnly(project(":ibatis-logger"))
+    testImplementation(kotlin("test"))
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testImplementation("org.apache.logging.log4j:log4j-core:2.26.1")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.named<Test>("test") {
+    useJUnitPlatform()
 }
 
 java {
     withSourcesJar()
-    withJavadocJar()
-}
-
-tasks.javadoc.configure {
-    options.encoding = "UTF-8"
-}
-tasks.javadoc{
-    enabled = false
+    toolchain.languageVersion.set(JavaLanguageVersion.of(8))
 }
 
 kotlin {
     jvmToolchain(8)
 }
-
 
 tasks.withType<org.gradle.jvm.tasks.Jar> {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
@@ -42,7 +49,6 @@ tasks.withType<org.gradle.jvm.tasks.Jar> {
     manifest {
         attributes(
             mapOf(
-                "Main-Class" to "com.mingliqiye.utils.main.Main",
                 "Specification-Title" to rootProject.name,
                 "Specification-Version" to rootProject.version,
                 "Specification-Vendor" to "minglipro",
@@ -68,14 +74,14 @@ tasks.withType<org.gradle.jvm.tasks.Jar> {
 
 tasks.register<Jar>("javaDocJar") {
     group = "build"
-    archiveClassifier.set("javadoc")
-    dependsOn("dokkaJavadoc")
+    archiveClassifier.set("javadoc-dec")
+    dependsOn("dokkaGeneratePublicationJavadoc")
     from(buildDir.resolve("dokka/javadoc"))
 }
 tasks.register<Jar>("kotlinDocJar") {
     group = "build"
-    archiveClassifier.set("kotlindoc")
-    dependsOn("dokkaHtml")
+    archiveClassifier.set("javadoc")
+    dependsOn("dokkaGeneratePublicationHtml")
     from(buildDir.resolve("dokka/html"))
 }
 tasks.build {
@@ -93,11 +99,8 @@ publishing {
     publications {
         create<MavenPublication>("mavenJava") {
             from(components["java"])
-            artifacts.clear()
-            artifact(tasks.named("jar"))
-            artifact(tasks.named("sourcesJar"))
-            artifact(tasks.named("javaDocJar"))
             artifact(tasks.named("kotlinDocJar"))
+            artifactId = rootProject.name
             pom {
                 name = "logger-log4j2"
                 url = "https://mingliqiye.com"
@@ -105,7 +108,7 @@ publishing {
                 licenses {
                     license {
                         name = "The Apache License, Version 2.0"
-                        url = "http://www.apache.org/licenses/LICENSE-2.0.txt"
+                        url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
                     }
                 }
                 developers {
@@ -137,6 +140,7 @@ tasks.named("generateMetadataFileForMavenJavaPublication") {
 signing {
     val secretKeyRingFile = System.getenv("SIGNING_SECRET_KEY_RING_FILE")
     val keyId = System.getenv("SIGNING_KEY_ID")
+    useGpgCmd()
     project.ext.set("signing.secretKeyRingFile", secretKeyRingFile)
     project.ext.set("signing.keyId", keyId)
     project.ext.set("signing.password", "")
