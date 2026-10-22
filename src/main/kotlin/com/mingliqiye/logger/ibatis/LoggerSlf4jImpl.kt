@@ -44,11 +44,3 @@ class LoggerSlf4jImpl : Log {
 
     override fun warn(s: String?) = log(Level.WARN, s)
 }
-
-private val log = getLogger("666")
-
-fun main() {
-    log info {
-        "ooo"
-    }
-}
