@@ -4,10 +4,12 @@ plugins {
 
 rootProject.name = "logger-log4j2"
 
+include("ibatis-logger")
+
 nmcpSettings {
     centralPortal {
         username = System.getenv("sonatype.username")
         password = System.getenv("sonatype.password")
-        publishingType = "AUTOMATIC"
+        publishingType = "USER_MANAGED"
     }
 }
