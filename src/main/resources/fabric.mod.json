@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "mingli-logger-slf4j-api",
+  "groupsId": "${GROUPSID}",
+  "artifactId": "${ARTIFACTID}",
+  "name": "MingLi Logger - A Java/kotlin Slf4j Logger",
+  "version": "${VERSIONS}",
+  "environment": "*",
+  "license": "Apache-2.0",
+  "contact": {
+    "homepage": "https://git.mingliqiye.com/minglipro/mingli-utils",
+    "issues": "https://git.mingliqiye.com/minglipro/mingli-utils/issues",
+    "sources": "https://git.mingliqiye.com/minglipro/mingli-utils"
+  },
+  "buildTime": "${buildTime}",
+  "jdk": {
+    "version": "${JDKVERSIONS}"
+  },
+  "authors": [
+    "minglipro"
+  ],
+  "depends": {
+    "fabricloader": "*"
+  },
+  "description": "A Java/kotlin Utils"
+}

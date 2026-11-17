@@ -11,21 +11,24 @@ plugins {
 }
 
 group = "com.mingliqiye.logger"
-version = "2.0.2"
+version = "1.0.2-S2.0.20"
 
 val buildDir: java.nio.file.Path = File("build").toPath()
 
 repositories {
+    maven {
+        name = "mingliqiye-public"
+        url = uri("https://repository.mingliqiye.com/repository/maven-public/")
+    }
     mavenCentral()
 }
 
 dependencies {
     api("org.slf4j:slf4j-api:2.0.20")
-    api("org.apache.logging.log4j:log4j-slf4j2-impl:2.26.1")
-    compileOnly(project(":ibatis-logger"))
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testImplementation("org.apache.logging.log4j:log4j-core:2.26.1")
+    testImplementation("org.apache.logging.log4j:log4j-slf4j2-impl:2.26.1")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
@@ -74,16 +77,17 @@ tasks.withType<org.gradle.jvm.tasks.Jar> {
 
 tasks.register<Jar>("javaDocJar") {
     group = "build"
-    archiveClassifier.set("javadoc-dec")
+    archiveClassifier.set("javadoc")
     dependsOn("dokkaGeneratePublicationJavadoc")
     from(buildDir.resolve("dokka/javadoc"))
 }
 tasks.register<Jar>("kotlinDocJar") {
     group = "build"
-    archiveClassifier.set("javadoc")
+    archiveClassifier.set("kotlindoc")
     dependsOn("dokkaGeneratePublicationHtml")
     from(buildDir.resolve("dokka/html"))
 }
+
 tasks.build {
     dependsOn("javaDocJar", "kotlinDocJar")
 }
@@ -99,12 +103,13 @@ publishing {
     publications {
         create<MavenPublication>("mavenJava") {
             from(components["java"])
+            artifact(tasks.named("javaDocJar"))
             artifact(tasks.named("kotlinDocJar"))
             artifactId = rootProject.name
             pom {
-                name = "logger-log4j2"
-                url = "https://mingliqiye.com"
-                description = "A Java/kotlin Logger"
+                name = "logger-slf4j-api"
+                url = "https://github.com/minglipro/logger-slf4j-api"
+                description = "A Java/kotlin Slf4j Logger"
                 licenses {
                     license {
                         name = "The Apache License, Version 2.0"
@@ -119,9 +124,9 @@ publishing {
                     }
                 }
                 scm {
-                    connection = "scm:git:https://github.com/minglipro/logger-log4j2.git"
-                    developerConnection = "scm:git:https://git.mingliqiye.com:minglipro/logger-log4j2.git"
-                    url = "https://github.com/minglipro/logger-log4j2"
+                    connection = "scm:git:https://github.com/minglipro/logger-slf4j-api.git"
+                    developerConnection = "scm:git:https://git.mingliqiye.com:minglipro/logger-slf4j-api.git"
+                    url = "https://github.com/minglipro/logger-slf4j-api"
                 }
             }
         }
@@ -134,7 +139,28 @@ publishing {
 }
 
 tasks.named("generateMetadataFileForMavenJavaPublication") {
-    dependsOn("javaDocJar", "kotlinDocJar")
+    dependsOn("javaDocJar")
+    dependsOn("kotlinDocJar")
+}
+
+tasks.processResources {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    outputs.upToDateWhen { false }
+    filesMatching(listOf("fabric.mod.json")) {
+        expand(
+            mapOf(
+                "VERSIONS" to project.version,
+                "GROUPSID" to project.group,
+                "ARTIFACTID" to project.name,
+                "JDKVERSIONS" to 8,
+                "buildTime" to LocalDateTime.now().format(
+                    DateTimeFormatter.ofPattern(
+                        "yyyy-MM-dd HH:mm:ss.SSSSSSS"
+                    )
+                )
+            )
+        )
+    }
 }
 
 signing {

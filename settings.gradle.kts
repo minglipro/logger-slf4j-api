@@ -2,9 +2,7 @@ plugins {
     id("com.gradleup.nmcp.settings") version("1.4.4")
 }
 
-rootProject.name = "logger-log4j2"
-
-include("ibatis-logger")
+rootProject.name = "logger-slf4j-api"
 
 nmcpSettings {
     centralPortal {
