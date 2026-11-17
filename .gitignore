@@ -40,3 +40,4 @@ bin/
 
 .idea
 .kotlin
+/log
