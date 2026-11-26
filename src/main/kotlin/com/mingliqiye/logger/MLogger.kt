@@ -7,28 +7,40 @@ import org.slf4j.event.Level
 import org.slf4j.spi.LocationAwareLogger
 
 /**
- * 对 SLF4J [Logger] 的包装类，在保留标准日志 API 的同时提供两类增强能力：
+ * SLF4J [Logger] 的包装实现，在完整保留标准日志 API 的同时提供三类增强能力：
  *
  * 1. **位置感知（Location Aware）**：当底层实现支持 [LocationAwareLogger] 时，
- *    日志的位置信息（类名、方法名、行号）会穿过本包装类，定位到真正调用
- *    `info` / `debug` 等方法的**业务代码**，而不是停留在 `MLogger` 内部。
- * 2. **便捷 API**：除实现 [Logger] 的全部标准方法外，额外提供
- *    - 接收任意对象（`Any?`）作为消息的方法，内部以 `"{}"` 占位符格式化；
- *    - 接收 `() -> String` 的**惰性求值**方法，仅在对应级别启用时才构造消息；
- *    - 上述方法均支持可选的 [Throwable] 与 [Marker] 重载。
+ *    日志中的类名、方法名和行号会穿过本包装类，定位到真正的业务调用点，
+ *    而不是停留在 `MLogger` 内部。
+ * 2. **Kotlin 便捷 API**：支持任意对象作为消息、`() -> String` 惰性求值，
+ *    以及可选 [Throwable] / [Marker] 的组合重载。
+ * 3. **内置 infix 写法**：`logger info "xxx"`、`logger error exception`，
+ *    无需额外 import `MLogger.Companion`。
  *
- * ### 实例获取
- * 本类的构造函数为 `internal`，应通过 [Loggers] 获取实例（带缓存，同名唯一）：
+ * ### 获取实例
+ * 构造函数是 `internal` 的，应通过 [Loggers] 获取。同一名称在进程内只创建
+ * 一个 [MLogger] 实例：
  * ```kotlin
- * val logger = Loggers.getLogger(MyService::class)
- * logger.info("user {} logged in", userId)
- * logger.debug { "expensive: " + buildDetail() }   // 级别关闭时不会执行
+ * val log = Loggers.getLogger(MyService::class)
  * ```
  *
- * ### 位置定位的前提
- * 位置感知依赖本类 `companion object` 中的 `FQCN` 常量与 [LocationAwareLogger.log]
- * 的协作。若底层实现不支持 [LocationAwareLogger]（例如纯 NOP 实现），会退化为
- * 普通 `atLevel(...)` 调用，此时日志位置将停在本包装类上，这是 SLF4J 的固有限制。
+ * ### 典型用法
+ * ```kotlin
+ * log.info("user {} logged in", userId)
+ * log.debug { "expensive: " + buildDetail() }   // 级别关闭时不会执行
+ * log info "启动完成"
+ * log error exception
+ * log.warn(marker, "带 Marker 的日志")
+ * ```
+ *
+ * ### 位置感知的前提
+ * 位置感知依赖底层 [Logger] 同时是 [LocationAwareLogger]。若底层实现不支持
+ * （例如 NOP Logger），会退化为 SLF4J 2.x 的 [Logger.atLevel] 构建器，
+ * 此时位置信息会停留在本包装类上，这是 SLF4J 的固有限制。
+ *
+ * ### 线程安全
+ * [MLogger] 实例本身没有可变状态，创建后可安全地在多线程间共享；实际的
+ * 日志过滤与输出由底层 SLF4J [Logger] 负责。
  *
  * @see Loggers
  * @see LocationAwareLogger
@@ -36,268 +48,49 @@ import org.slf4j.spi.LocationAwareLogger
 class MLogger : Logger {
 	
 	/**
-	 * 本类共用的常量区。
-	 *
-	 * 把与实例无关、整个类只需一份的常量放在 `companion object` 中，避免每个
-	 * [MLogger] 实例都持有一份引用。
+	 * 整个类共享的常量。
 	 */
 	companion object {
 		/**
-		 * 传给 [LocationAwareLogger.log] 的“跳过边界”完全限定类名（FQCN）。
+		 * 传给 [LocationAwareLogger.log] 的调用边界 FQCN（本类的完全限定名）。
 		 *
-		 * 值为 `MLogger::class.java.name`，即 `"com.mingliqiye.logger.MLogger"`。
-		 * 底层实现（如 Logback）在分析调用栈时，会跳过类名等于此值的栈帧，
-		 * 再跳过日志框架自身的帧，从而把日志位置定位到真正的业务调用者。
-		 *
-		 * ### 为什么用 `::class.java.name` 而不是硬编码字符串
-		 * 硬编码字符串在类被重命名或移动包后不会自动更新，日志位置会悄悄回退到
-		 * 包装层，且很难察觉。用 `MLogger::class.java.name` 可以让值自动跟随类名，
-		 * 重构时不会脱节。
-		 *
-		 * ### 唯一性
-		 * 本常量是整个项目中 `MLogger` 的 FQCN 的**唯一来源**。[Loggers] 不再
-		 * 维护自己的 FQCN 常量，避免类重命名时两处定义不同步的问题。
+		 * 底层实现会跳过类名等于该值的栈帧，从而把日志位置定位到业务调用者。
 		 */
 		private val FQCN: String = MLogger::class.java.name
-		
-		
-		/**
-		 * 以中缀语法记录一条 DEBUG 级别日志。
-		 *
-		 * 内部等价于 `this.debug("{}", string)`，把 [string] 作为消息模板 `{}` 的
-		 * 占位符参数输出。注意：[string] 不是直接的消息文本，而是占位符参数。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger debug "用户登录成功"
-		 * ```
-		 *
-		 * @param string 要记录的对象，通过 `toString()` 转为字符串后填充 `{}` 占位符；
-		 *               为 `null` 时输出字符串 `"null"`。
-		 */
-		infix fun MLogger.debug(string: Any?) {
-			this.debug("{}", string as Any?)
-		}
-		
-		/**
-		 * 以中缀语法记录一条带异常堆栈的 DEBUG 级别日志。
-		 *
-		 * 内部等价于 `this.debug("{}", t?.message, t)`，把异常消息作为 `{}` 占位符
-		 * 参数输出，并把 [t] 作为异常堆栈一并记录。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger debug exception
-		 * ```
-		 *
-		 * @param t 要记录的异常对象；`null` 时异常消息为 `"null"`，堆栈为空。
-		 */
-		infix fun MLogger.debug(t: Throwable?) {
-			this.debug("{}", t?.message, t)
-		}
-		
-		/**
-		 * 以中缀语法记录一条 INFO 级别日志。
-		 *
-		 * 内部等价于 `this.info("{}", string)`，把 [string] 作为消息模板 `{}` 的
-		 * 占位符参数输出。注意：[string] 不是直接的消息文本，而是占位符参数。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger info "订单创建完成"
-		 * ```
-		 *
-		 * @param string 要记录的对象，通过 `toString()` 转为字符串后填充 `{}` 占位符；
-		 *               为 `null` 时输出字符串 `"null"`。
-		 */
-		infix fun MLogger.info(string: Any?) {
-			this.info("{}", string as Any?)
-		}
-		
-		/**
-		 * 以中缀语法记录一条带异常堆栈的 INFO 级别日志。
-		 *
-		 * 内部等价于 `this.info("{}", t?.message, t)`，把异常消息作为 `{}` 占位符
-		 * 参数输出，并把 [t] 作为异常堆栈一并记录。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger info exception
-		 * ```
-		 *
-		 * @param t 要记录的异常对象；`null` 时异常消息为 `"null"`，堆栈为空。
-		 */
-		infix fun MLogger.info(t: Throwable?) {
-			this.info("{}", t?.message, t)
-		}
-		
-		/**
-		 * 以中缀语法记录一条 TRACE 级别日志。
-		 *
-		 * 内部等价于 `this.trace("{}", string)`，把 [string] 作为消息模板 `{}` 的
-		 * 占位符参数输出。注意：[string] 不是直接的消息文本，而是占位符参数。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger trace "进入方法 handleRequest"
-		 * ```
-		 *
-		 * @param string 要记录的对象，通过 `toString()` 转为字符串后填充 `{}` 占位符；
-		 *               为 `null` 时输出字符串 `"null"`。
-		 */
-		infix fun MLogger.trace(string: Any?) {
-			this.trace("{}", string as Any?)
-		}
-		
-		/**
-		 * 以中缀语法记录一条带异常堆栈的 TRACE 级别日志。
-		 *
-		 * 内部等价于 `this.trace("{}", t?.message, t)`，把异常消息作为 `{}` 占位符
-		 * 参数输出，并把 [t] 作为异常堆栈一并记录。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger trace exception
-		 * ```
-		 *
-		 * @param t 要记录的异常对象；`null` 时异常消息为 `"null"`，堆栈为空。
-		 */
-		infix fun MLogger.trace(t: Throwable?) {
-			this.trace("{}", t?.message, t)
-		}
-		
-		/**
-		 * 以中缀语法记录一条 ERROR 级别日志。
-		 *
-		 * 内部等价于 `this.error("{}", string)`，把 [string] 作为消息模板 `{}` 的
-		 * 占位符参数输出。注意：[string] 不是直接的消息文本，而是占位符参数。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger error "支付回调验签失败"
-		 * ```
-		 *
-		 * @param string 要记录的对象，通过 `toString()` 转为字符串后填充 `{}` 占位符；
-		 *               为 `null` 时输出字符串 `"null"`。
-		 */
-		infix fun MLogger.error(string: Any?) {
-			this.error("{}", string as Any?)
-		}
-		
-		/**
-		 * 以中缀语法记录一条带异常堆栈的 ERROR 级别日志。
-		 *
-		 * 内部等价于 `this.error("{}", t?.message, t)`，把异常消息作为 `{}` 占位符
-		 * 参数输出，并把 [t] 作为异常堆栈一并记录。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger error exception
-		 * ```
-		 *
-		 * @param t 要记录的异常对象；`null` 时异常消息为 `"null"`，堆栈为空。
-		 */
-		infix fun MLogger.error(t: Throwable?) {
-			this.error("{}", t?.message, t)
-		}
-		
-		/**
-		 * 以中缀语法记录一条 WARN 级别日志。
-		 *
-		 * 内部等价于 `this.warn("{}", string)`，把 [string] 作为消息模板 `{}` 的
-		 * 占位符参数输出。注意：[string] 不是直接的消息文本，而是占位符参数。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger warn "连接池使用率超过 80%"
-		 * ```
-		 *
-		 * @param string 要记录的对象，通过 `toString()` 转为字符串后填充 `{}` 占位符；
-		 *               为 `null` 时输出字符串 `"null"`。
-		 */
-		infix fun MLogger.warn(string: Any?) {
-			this.warn("{}", string as Any?)
-		}
-		
-		/**
-		 * 以中缀语法记录一条带异常堆栈的 WARN 级别日志。
-		 *
-		 * 内部等价于 `this.warn("{}", t?.message, t)`，把异常消息作为 `{}` 占位符
-		 * 参数输出，并把 [t] 作为异常堆栈一并记录。
-		 *
-		 * 使用示例：
-		 * ```
-		 * logger warn exception
-		 * ```
-		 *
-		 * @param t 要记录的异常对象；`null` 时异常消息为 `"null"`，堆栈为空。
-		 */
-		infix fun MLogger.warn(t: Throwable?) {
-			this.warn("{}", t?.message, t)
-		}
 	}
 	
 	/**
-	 * 底层 SLF4J [Logger]，所有标准日志方法的最终委托目标。
-	 *
-	 * 在构造时通过 [LoggerFactory.getLogger] 创建，之后不再变化。
+	 * 底层 SLF4J [Logger]；所有日志调用最终委托给它。
 	 */
 	private val logger: Logger
 	
 	/**
-	 * 底层 [Logger] 对应的 [LocationAwareLogger] 视图；若底层实现不支持则为 `null`。
-	 *
-	 * 非 `null` 时，[log] 会走位置感知路径，把 `FQCN` 作为“跳过边界”
-	 * 传给底层实现，从而让日志位置穿过本包装类。
+	 * 底层 [Logger] 的位置感知视图；底层实现不是 [LocationAwareLogger] 时为 `null`。
 	 */
 	private val locationAwareLogger: LocationAwareLogger?
 	
 	/**
-	 * [locationAwareLogger] 是否非 `null` 的布尔快照，用于在 [log] 热路径中避免
-	 * 反复进行 `null` 判断。
-	 *
-	 * 该字段只在构造函数中赋值一次，之后不再变化。语义上应为 `val`，当前声明为
-	 * `var` 仅因为在 `apply { ... }` 块里被赋值，编译器无法在字段声明处完成初始化。
-	 * 可改为在构造体内用局部变量显式判断，把字段本身声明为 `val`：
-	 * ```kotlin
-	 * val la = logger as? LocationAwareLogger
-	 * locationAwareLogger = la
-	 * isLocationAwareLogger = la != null
-	 * ```
+	 * 位置感知能力快照，构造时根据底层 Logger 是否实现 [LocationAwareLogger] 确定。
 	 */
 	private var isLocationAwareLogger: Boolean = false
 	
 	/**
-	 * 核心日志入口（占位符 + 可变参数形式）。
+	 * 核心日志入口（占位符 + 可变参数形式），供本类标准方法与便捷方法委托。
 	 *
-	 * 根据底层实现是否支持 [LocationAwareLogger]，选择两条路径之一：
-	 * - **支持**：调用 [LocationAwareLogger.log]，并传入 `FQCN` 作为调用边界，
-	 *   使日志位置穿过本类，定位到业务调用者。
-	 * - **不支持**：退化为 SLF4J 2.x 的 [Logger.atLevel] 构建器，
-	 *   依次附加 [Marker]、[Throwable]，再以 `msg` 和 [arguments] 记录。
+	 * 底层支持 [LocationAwareLogger] 时，通过 `FQCN` 跳过本类栈帧，把位置定位到
+	 * 业务调用方；否则退回 SLF4J 2.x 的 [Logger.atLevel] 构建器。
 	 *
-	 * ### 参数与 SLF4J 占位符
-	 * [msg] 中的 `{}` 会被 [arguments] 中的元素依次替换，规则与 SLF4J 原生一致。
-	 * 若 [msg] 为 `null`，不同实现的行为可能略有差异，调用方应避免传 `null`。
-	 *
-	 * ### 默认参数与 `$default`
-	 * 本方法声明了多个默认参数，Kotlin 编译器会生成一个 `log$default` 合成方法。
-	 * 这不会影响位置感知，因为 Logback 会跳过所有类名为 `FQCN` 的栈帧
-	 * （包括 `log$default`）。但如果你在其他类里以“只传部分参数”的方式调用它，
-	 * 栈帧里会多出一帧 `log$default`，排查调用栈时需留意。
-	 *
-	 * ### `?.` 与 [isLocationAwareLogger] 的冗余
-	 * 外层已经判断了 [isLocationAwareLogger]，理论上 [locationAwareLogger] 必然非 `null`，
-	 * 这里的 `?.` 是防御性冗余。建议二选一：要么去掉 `?.`，要么去掉
-	 * [isLocationAwareLogger] 判断、直接依赖 `?.`，避免读者误以为二者可能不一致。
+	 * [msg] 中的 `{}` 会按 SLF4J 规则被 [arguments] 依次替换。外部调用方通常
+	 * 不需要直接调用本方法，使用标准 `trace` / `debug` / `info` / `warn` / `error`
+	 * 或 [MLogger] 提供的便捷重载即可。
 	 *
 	 * @param level 日志级别，默认 [Level.DEBUG]。
-	 * @param msg 日志消息，可包含 `{}` 占位符；默认 `null`。
-	 * @param throwable 关联的异常对象，会随日志输出完整堆栈；默认 `null`。
-	 * @param marker 日志标记，用于超越级别的过滤与路由；默认 `null`。
-	 * @param arguments 用于替换 [msg] 中 `{}` 的参数；默认空数组。
+	 * @param msg 日志消息，可包含 `{}` 占位符。
+	 * @param throwable 关联异常，会随日志输出完整堆栈。
+	 * @param marker 日志标记，用于过滤与路由。
+	 * @param arguments 用于替换 `{}` 的参数。
 	 */
-	internal fun log(
+	fun log(
 		level: Level = Level.DEBUG,
 		msg: String? = null,
 		throwable: Throwable? = null,
@@ -305,7 +98,7 @@ class MLogger : Logger {
 		vararg arguments: Any? = emptyArray()
 	) {
 		if (isLocationAwareLogger) {
-			locationAwareLogger?.log(
+			locationAwareLogger!!.log(
 				marker, FQCN, level.toInt(), msg, arguments, throwable
 			)
 		} else {
@@ -318,14 +111,10 @@ class MLogger : Logger {
 	/**
 	 * 按名称创建 [MLogger]。
 	 *
-	 * 通常不应直接调用（构造函数为 `internal`），请使用 [Loggers.getLogger] 以获得
-	 * 缓存与进程内唯一性。
+	 * 仅供 [Loggers] 内部使用；业务代码应通过 [Loggers.getLogger] 获取带缓存的
+	 * 实例。
 	 *
-	 * 本构造器与 [MLogger] 的 [Class] 构造器在 [Loggers] 的缓存中共享同一 key
-	 * （`name` 与 `clazz.name` 相同时命中同一条目），因此两者创建的实例必须行为等价。
-	 * 若未来在此构造器中引入额外逻辑，需要重新评估缓存 key 策略。
-	 *
-	 * @param name Logger 名称，通常为类的完全限定名或自定义标识。
+	 * @param name Logger 名称，通常是类的完全限定名。
 	 */
 	internal constructor(name: String) {
 		logger = LoggerFactory.getLogger(name)
@@ -335,16 +124,12 @@ class MLogger : Logger {
 	}
 	
 	/**
-	 * 按类型创建 [MLogger]。
+	 * 按 [Class] 创建 [MLogger]，Logger 名称为 [Class.getName]。
 	 *
-	 * 通常不应直接调用（构造函数为 `internal`），请使用 [Loggers.getLogger] 以获得
-	 * 缓存与进程内唯一性。Logger 名称取自 [Class.getName]。
+	 * 仅供 [Loggers] 内部使用；业务代码应通过 [Loggers.getLogger] 获取带缓存的
+	 * 实例。
 	 *
-	 * 本构造器与 [MLogger] 的 [String] 构造器在 [Loggers] 的缓存中共享同一 key
-	 * （`clazz.name` 与 `name` 相同时命中同一条目），因此两者创建的实例必须行为等价。
-	 * 若未来在此构造器中引入依赖 [Class] 对象本身的逻辑，需要重新评估缓存 key 策略。
-	 *
-	 * @param clazz 用于推断 Logger 名称的类。
+	 * @param clazz 用于推断名称的类。
 	 */
 	internal constructor(clazz: Class<*>) {
 		logger = LoggerFactory.getLogger(clazz)
@@ -353,6 +138,181 @@ class MLogger : Logger {
 		}
 	}
 	
+	/**
+	 * 以中缀写法记录一条 DEBUG 日志。
+	 *
+	 * [string] 作为 `{}` 占位符参数传给底层日志，等价于：
+	 * ```kotlin
+	 * debug("{}", string)
+	 * ```
+	 * 底层会调用 [string] 的 `toString()` 填充占位符；传 `null` 时显示 `null`。
+	 *
+	 * ```kotlin
+	 * logger debug "cache miss"
+	 * ```
+	 *
+	 * @param string 消息对象；允许为 `null`。
+	 */
+	infix fun debug(string: Any?) {
+		debug("{}", string)
+	}
+
+	/**
+	 * 以中缀写法记录一条带异常堆栈的 DEBUG 日志。
+	 *
+	 * 等价于 `debug("{}", t?.message, t)`：异常消息作为日志文本，[t] 本身作为
+	 * 异常随日志输出。`t` 为 `null` 时没有堆栈，日志文本为 `null`。
+	 *
+	 * ```kotlin
+	 * logger debug exception
+	 * ```
+	 *
+	 * @param t 要记录的异常；允许为 `null`。
+	 */
+	infix fun debug(t: Throwable?) {
+		debug("{}", t?.message, t)
+	}
+
+	/**
+	 * 以中缀写法记录一条 INFO 日志。
+	 *
+	 * [string] 作为 `{}` 占位符参数传给底层日志，等价于：
+	 * ```kotlin
+	 * info("{}", string)
+	 * ```
+	 * 底层会调用 [string] 的 `toString()` 填充占位符；传 `null` 时显示 `null`。
+	 *
+	 * ```kotlin
+	 * logger info "订单创建完成"
+	 * ```
+	 *
+	 * @param string 消息对象；允许为 `null`。
+	 */
+	infix fun info(string: Any?) {
+		info("{}", string)
+	}
+
+	/**
+	 * 以中缀写法记录一条带异常堆栈的 INFO 日志。
+	 *
+	 * 等价于 `info("{}", t?.message, t)`：异常消息作为日志文本，[t] 本身作为
+	 * 异常随日志输出。`t` 为 `null` 时没有堆栈，日志文本为 `null`。
+	 *
+	 * ```kotlin
+	 * logger info exception
+	 * ```
+	 *
+	 * @param t 要记录的异常；允许为 `null`。
+	 */
+	infix fun info(t: Throwable?) {
+		info("{}", t?.message, t)
+	}
+
+	/**
+	 * 以中缀写法记录一条 TRACE 日志。
+	 *
+	 * [string] 作为 `{}` 占位符参数传给底层日志，等价于：
+	 * ```kotlin
+	 * trace("{}", string)
+	 * ```
+	 * 底层会调用 [string] 的 `toString()` 填充占位符；传 `null` 时显示 `null`。
+	 *
+	 * ```kotlin
+	 * logger trace "进入方法 handleRequest"
+	 * ```
+	 *
+	 * @param string 消息对象；允许为 `null`。
+	 */
+	infix fun trace(string: Any?) {
+		trace("{}", string)
+	}
+
+	/**
+	 * 以中缀写法记录一条带异常堆栈的 TRACE 日志。
+	 *
+	 * 等价于 `trace("{}", t?.message, t)`：异常消息作为日志文本，[t] 本身作为
+	 * 异常随日志输出。`t` 为 `null` 时没有堆栈，日志文本为 `null`。
+	 *
+	 * ```kotlin
+	 * logger trace exception
+	 * ```
+	 *
+	 * @param t 要记录的异常；允许为 `null`。
+	 */
+	infix fun trace(t: Throwable?) {
+		trace("{}", t?.message, t)
+	}
+
+	/**
+	 * 以中缀写法记录一条 WARN 日志。
+	 *
+	 * [string] 作为 `{}` 占位符参数传给底层日志，等价于：
+	 * ```kotlin
+	 * warn("{}", string)
+	 * ```
+	 * 底层会调用 [string] 的 `toString()` 填充占位符；传 `null` 时显示 `null`。
+	 *
+	 * ```kotlin
+	 * logger warn "连接池使用率超过 80%"
+	 * ```
+	 *
+	 * @param string 消息对象；允许为 `null`。
+	 */
+	infix fun warn(string: Any?) {
+		warn("{}", string)
+	}
+
+	/**
+	 * 以中缀写法记录一条带异常堆栈的 WARN 日志。
+	 *
+	 * 等价于 `warn("{}", t?.message, t)`：异常消息作为日志文本，[t] 本身作为
+	 * 异常随日志输出。`t` 为 `null` 时没有堆栈，日志文本为 `null`。
+	 *
+	 * ```kotlin
+	 * logger warn exception
+	 * ```
+	 *
+	 * @param t 要记录的异常；允许为 `null`。
+	 */
+	infix fun warn(t: Throwable?) {
+		warn("{}", t?.message, t)
+	}
+
+	/**
+	 * 以中缀写法记录一条 ERROR 日志。
+	 *
+	 * [string] 作为 `{}` 占位符参数传给底层日志，等价于：
+	 * ```kotlin
+	 * error("{}", string)
+	 * ```
+	 * 底层会调用 [string] 的 `toString()` 填充占位符；传 `null` 时显示 `null`。
+	 *
+	 * ```kotlin
+	 * logger error "支付回调验签失败"
+	 * ```
+	 *
+	 * @param string 消息对象；允许为 `null`。
+	 */
+	infix fun error(string: Any?) {
+		error("{}", string)
+	}
+
+	/**
+	 * 以中缀写法记录一条带异常堆栈的 ERROR 日志。
+	 *
+	 * 等价于 `error("{}", t?.message, t)`：异常消息作为日志文本，[t] 本身作为
+	 * 异常随日志输出。`t` 为 `null` 时没有堆栈，日志文本为 `null`。
+	 *
+	 * ```kotlin
+	 * logger error exception
+	 * ```
+	 *
+	 * @param t 要记录的异常；允许为 `null`。
+	 */
+	infix fun error(t: Throwable?) {
+		error("{}", t?.message, t)
+	}
+
 	/**
 	 * 返回底层 Logger 的名称，即构造时传入的名称或类的完全限定名。
 	 *
@@ -1073,26 +1033,21 @@ class MLogger : Logger {
 	}
 	
 	/**
-	 * 核心日志入口（**惰性求值**形式）。
+	 * 核心日志入口（惰性求值形式），供便捷方法委托。
 	 *
-	 * 与另一个 [log] 重载的区别在于：消息由 [caller] 函数在**确认需要记录时**才求值。
-	 * 当 [isLocationAwareLogger] 为 `true` 时，只有 [isEnabled] 返回 `true` 才会调用
-	 * [caller]；否则消息构造的开销被完全避免。非位置感知分支使用 SLF4J 2.x 的
-	 * [Logger.atLevel] 构建器，其 `log(Supplier)` 重载本身也是惰性的。
+	 * 只有对应级别启用时才会调用 [caller] 构造消息；级别关闭时消息构造开销被
+	 * 完全避免。底层支持 [LocationAwareLogger] 时，通过 `FQCN` 跳过本类栈帧；
+	 * 否则使用 SLF4J 2.x 的 [Logger.atLevel] 构建器，其 `log(Supplier)` 重载
+	 * 本身就是惰性的。
 	 *
-	 * ### 默认参数与 `$default`
-	 * 本方法同样声明了默认参数，会生成 `log$default` 合成方法。位置感知路径下
-	 * Logback 会跳过所有类名为 `FQCN` 的栈帧，因此不影响定位；但排查
-	 * 调用栈时可能看到 `log$default` 帧。
-	 *
-	 * ### 与另一个 [log] 重载的取舍
-	 * 本重载的 [caller] 没有占位符参数，适合“消息本身就是一次昂贵构造”的场景。
-	 * 如果消息需要 `{}` 格式化参数，请使用另一个重载。
+	 * 注意：位置感知分支目前只按 [level] 判断是否启用，不区分 [marker]；
+	 * 如果需要按 Marker 精确控制惰性求值，可先使用底层 Logger 的
+	 * `isXxxEnabled(marker)` 判断。
 	 *
 	 * @param level 日志级别，默认 [Level.DEBUG]。
-	 * @param throwable 关联的异常对象，会随日志输出完整堆栈；默认 `null`。
-	 * @param marker 日志标记，用于超越级别的过滤与路由；默认 `null`。
-	 * @param caller 消息提供函数，仅在级别启用时被调用。
+	 * @param throwable 关联异常，会随日志输出完整堆栈。
+	 * @param marker 日志标记。
+	 * @param caller 消息提供函数，仅在级别启用时调用。
 	 */
 	internal fun log(
 		level: Level = Level.DEBUG, throwable: Throwable? = null, marker: Marker? = null, caller: () -> String
@@ -1109,12 +1064,12 @@ class MLogger : Logger {
 	}
 	
 	/**
-	 * 判断指定 [Level] 是否启用。
+	 * 判断指定 [Level] 在当前日志器上是否启用。
 	 *
-	 * 内部按 [Level] 分派到对应的 `isXxxEnabled` 方法，供 [log]（惰性求值重载）
-	 * 在调用 [caller] 之前做前置判断。
+	 * 等价于对应级别的 `isXxxEnabled`，不包含 [Marker] 判断。该方法供惰性日志
+	 * 方法和调用方在构造消息前做前置判断。
 	 *
-	 * @param level 待判断的日志级别。
+	 * @param level 日志级别。
 	 * @return 该级别启用返回 `true`。
 	 */
 	fun isEnabled(level: Level): Boolean = when (level) {
@@ -1131,13 +1086,12 @@ class MLogger : Logger {
 	 * 等价于 `info("{}", arg, throwable)`：对象被作为**单个占位符参数**传入，
 	 * 由底层实现调用其 `toString()` 填充 `{}`。若 [arg] 为 `null`，输出为 `"null"`。
 	 *
-	 * 由于带 [JvmOverloads]，Java 侧会生成 `info(Object)` 和 `info(Object, Throwable)`
-	 * 两个重载，便于 Java 调用方省略 [throwable]。
+	 * 单参数调用由内置的 infix `info(Any?)` 提供（Java 侧同样可见 `info(Object)`），
+	 * 本方法保留默认 [throwable] 参数，便于显式传入异常。
 	 *
 	 * @param arg 作为消息内容输出的对象。
 	 * @param throwable 关联的异常对象；默认 `null`。
 	 */
-	@JvmOverloads
 	fun info(arg: Any?, throwable: Throwable? = null) {
 		log(
 			Level.INFO, "{}", throwable = throwable, arguments = arrayOf(arg)
@@ -1216,7 +1170,6 @@ class MLogger : Logger {
 	 * @param throwable 关联的异常对象；默认 `null`。
 	 * @see info
 	 */
-	@JvmOverloads
 	fun warn(arg: Any?, throwable: Throwable? = null) {
 		log(
 			Level.WARN, "{}", throwable = throwable, arguments = arrayOf(arg)
@@ -1286,7 +1239,6 @@ class MLogger : Logger {
 	 * @param throwable 关联的异常对象；默认 `null`。
 	 * @see info
 	 */
-	@JvmOverloads
 	fun error(arg: Any?, throwable: Throwable? = null) {
 		log(
 			Level.ERROR, "{}", throwable = throwable, arguments = arrayOf(arg)
@@ -1356,7 +1308,6 @@ class MLogger : Logger {
 	 * @param throwable 关联的异常对象；默认 `null`。
 	 * @see info
 	 */
-	@JvmOverloads
 	fun debug(arg: Any?, throwable: Throwable? = null) {
 		log(
 			Level.DEBUG, "{}", throwable = throwable, arguments = arrayOf(arg)
@@ -1426,7 +1377,6 @@ class MLogger : Logger {
 	 * @param throwable 关联的异常对象；默认 `null`。
 	 * @see info
 	 */
-	@JvmOverloads
 	fun trace(arg: Any?, throwable: Throwable? = null) {
 		log(
 			Level.TRACE, "{}", throwable = throwable, arguments = arrayOf(arg)

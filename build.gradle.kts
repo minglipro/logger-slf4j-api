@@ -11,7 +11,7 @@ plugins {
 }
 
 group = "com.mingliqiye.logger"
-version = "1.0.2-S2.0.20"
+version = "1.0.4-S2.0.20"
 
 val buildDir: java.nio.file.Path = File("build").toPath()
 
@@ -93,6 +93,7 @@ tasks.build {
 }
 
 
+
 publishing {
     repositories {
         maven {
@@ -164,10 +165,7 @@ tasks.processResources {
 }
 
 signing {
-    val secretKeyRingFile = System.getenv("SIGNING_SECRET_KEY_RING_FILE")
     val keyId = System.getenv("SIGNING_KEY_ID")
-    useGpgCmd()
-    project.ext.set("signing.secretKeyRingFile", secretKeyRingFile)
     project.ext.set("signing.keyId", keyId)
-    project.ext.set("signing.password", "")
+    useGpgCmd()
 }
